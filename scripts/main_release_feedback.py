@@ -55,8 +55,10 @@ def affected_prs(repository, source, previous):
     return result
 
 
-def failure(repository, source, run, url, exercise=False, phase="unknown"):
+def failure(repository, source, run, url, exercise=False, phase="unknown", target=None):
     previous = channels(GitHub(repository))
+    if target:
+        previous = {target: previous[target]}
     ensure_label(repository)
     marker = f"<!-- main-release:{'exercise' if exercise else 'failure'} {source} -->"
     issues = incidents(repository)
@@ -71,7 +73,7 @@ def failure(repository, source, run, url, exercise=False, phase="unknown"):
             "先保留准确源码上的失败证据；若确认为合并门禁遗漏，"
             "给本工单加 `merge-gate-gap` 标签，并补进合并前的对应回归，再修复和验证。"
             "基础设施故障应记录原因后重试同一不可变候选，不能靠重跑掩盖业务失败。"
-            "本工单保持打开，直到后续插件双平台发布成功。")
+            "本工单保持打开，直到故障平台发布成功。")
     issue = matches[0] if matches else forge.api(
         f"repos/{repository}/issues", "--method", "POST", "-f",
         f"title={'[演练] ' if exercise else ''}发布失败：{source[:12]} 已合并但尚未发布", "-f", f"body={body}",
@@ -120,7 +122,7 @@ def recovered(repository, source, run):
                 and not repair_covers(issue, match[1], source)):
             continue
         comment_once(repository, issue["number"], f"<!-- main-release:recovered {source} {run} -->",
-                     f"双平台发布渠道已读回同一源码 `{source}`；发布故障已恢复。"
+                     f"发布渠道已读回修复源码 `{source}`；发布故障已恢复。"
                      "\n这不表示已安装、重载或完成客户端验收。")
         forge.api(f"repos/{repository}/issues/{issue['number']}", "--method", "PATCH",
                   "-f", "state=closed")

@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from package_plugin import ROOT, command, fingerprint, verify_package, versions
+from package_plugin import ROOT, TARGETS, command, fingerprint, verify_package, versions
 from verify_remote_release import verify
 
 
@@ -33,9 +33,13 @@ def authorize(package, channel, evidence, root=ROOT):
     return manifest
 
 
+class ChannelSuperseded(ValueError):
+    pass
+
+
 def validate_channel_progression(previous, manifest):
     if tuple(map(int, previous["version"].split("."))) > tuple(map(int, manifest["version"].split("."))):
-        raise ValueError("Cannot downgrade a release channel; use a pinned consumer rollback")
+        raise ChannelSuperseded("Cannot downgrade a release channel; use a pinned consumer rollback")
     if previous["version"] == manifest["version"] and previous != manifest:
         raise ValueError("Published versions are immutable; changed artifacts require a new version")
 
@@ -73,8 +77,11 @@ def remote_revisions(checkout, references):
 
 def publish_many(repository, packages, channel):
     authorized = [(package, authorize(package, channel, evidence)) for package, evidence in packages]
-    if not authorized or len({manifest["target"] for _, manifest in authorized}) != len(authorized):
+    targets = {manifest["target"] for _, manifest in authorized}
+    if not authorized or len(targets) != len(authorized):
         raise ValueError("Publish distinct platform packages together")
+    if channel == "stable" and targets != set(TARGETS):
+        raise ValueError("Stable requires both platform packages")
     identity_fields = ("source_commit", "build_sha256", "version", "contract_sha256")
     if len({tuple(manifest.get(field) for field in identity_fields) for _, manifest in authorized}) != 1:
         raise ValueError("Platform packages belong to different source, version or contract")
@@ -112,17 +119,26 @@ def main():
     parser.add_argument("--channel", choices=("candidate", "stable"), default="candidate")
     parser.add_argument("--evidence", type=Path, action="append")
     parser.add_argument("--ssh-config", type=Path)
+    parser.add_argument("--allow-superseded", action="store_true")
     arguments = parser.parse_args()
     if arguments.ssh_config:
         os.environ["GIT_SSH_COMMAND"] = shlex.join(["ssh", "-F", str(arguments.ssh_config.resolve())])
     packages = arguments.packages or arguments.package
+    if arguments.allow_superseded and (arguments.channel != "candidate" or len(packages) != 1):
+        parser.error("Only single-platform candidates can be superseded")
     if arguments.evidence and len(arguments.evidence) != len(packages):
         parser.error("Supply one --evidence per --package")
     evidence = arguments.evidence or [None] * len(packages)
-    results = publish_many(arguments.repository, [
-        (package.resolve(), record.resolve() if record else None)
-        for package, record in zip(packages, evidence)
-    ], arguments.channel)
+    try:
+        results = publish_many(arguments.repository, [
+            (package.resolve(), record.resolve() if record else None)
+            for package, record in zip(packages, evidence)
+        ], arguments.channel)
+    except ChannelSuperseded:
+        if not arguments.allow_superseded:
+            raise
+        print(json.dumps({"status": "superseded"}))
+        return
     result = results[0] if len(results) == 1 else {"publications": results}
     print(json.dumps(result, indent=2))
 

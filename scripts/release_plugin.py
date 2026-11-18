@@ -28,6 +28,10 @@ def release_tag(source, reference="refs/heads/main"):
     return f"rehearsal-{source}"
 
 
+def platform_tag(tag, target):
+    return f"{tag}-{target}"
+
+
 class GitHub:
     def __init__(self, repository):
         self.repository = repository
@@ -293,7 +297,8 @@ def require_main_ancestor(github, source):
         raise ValueError("Candidate publication requires a source contained in main")
 
 
-def publish_saved(github, tag, source, channel, evidence, directory, reference="refs/heads/main"):
+def publish_saved(github, tag, source, channel, evidence, directory, reference="refs/heads/main",
+                  *, target=None, platform_releases=False):
     rehearsal = reference != "refs/heads/main"
     if rehearsal and (channel != "candidate" or tag != release_tag(source, reference)):
         raise ValueError("Rehearsal releases require the exact source tag and candidate validation")
@@ -301,43 +306,72 @@ def publish_saved(github, tag, source, channel, evidence, directory, reference="
         raise ValueError("Rehearsal releases cannot update delivery channels")
     if channel == "stable" and evidence is None:
         raise ValueError("Stable promotion requires reviewed evidence for both platforms")
-    release = github.release(tag)
-    if not isinstance(release, dict):
-        raise ValueError("Release has not been saved")
-    if github.api(f"commits/{tag}")["sha"] != source:
-        raise ValueError("Version tag belongs to different source; use a new version")
-    required = {asset_name(target) + suffix for target in TARGETS for suffix in ("", ".sha256")}
-    if not required.issubset({entry["name"] for entry in release["assets"]}):
-        if channel == "stable" or not release["draft"]:
-            raise ValueError("Release is missing required platform packages or checksums")
-        return {"status": "incomplete", "tag": tag, "message": "Draft retained; waiting for both platforms"}
+    if target and (target not in TARGETS or channel == "stable" or rehearsal):
+        raise ValueError("Single-platform publication requires a native candidate target")
+    targets = (target,) if target else tuple(sorted(TARGETS))
+    tags = {item: platform_tag(tag, item) if target or platform_releases else tag for item in targets}
+    releases = {saved_tag: github.release(saved_tag) for saved_tag in sorted(set(tags.values()))}
+    for saved_tag, release in releases.items():
+        if not isinstance(release, dict):
+            raise ValueError(f"Release has not been saved: {saved_tag}")
+        if github.api(f"commits/{saved_tag}")["sha"] != source:
+            raise ValueError("Version tag belongs to different source; use a new version")
+        required = {asset_name(item) + suffix for item in targets if tags[item] == saved_tag
+                    for suffix in ("", ".sha256")}
+        if not required.issubset({entry["name"] for entry in release["assets"]}):
+            if channel == "stable" or not release["draft"] or target:
+                raise ValueError("Release is missing required platform packages or checksums")
+            return {"status": "incomplete", "tag": tag, "message": "Draft retained; waiting for both platforms"}
     if channel == "candidate" and not rehearsal:
         require_main_ancestor(github, source)
     checkout = directory / "source"
     source_checkout(source, checkout)
     packages = []
-    for target in sorted(TARGETS):
-        platform_directory = directory / target
+    for item, saved_tag in tags.items():
+        platform_directory = directory / item
         platform_directory.mkdir()
-        package = read_package(github, tag, target, source, platform_directory)
+        package = read_package(github, saved_tag, item, source, platform_directory)
         manifest = verify_package(package)
-        startup = read_startup(github, tag, manifest, platform_directory)
-        if startup is None and channel == "candidate":
-            raise ValueError(f"Release is missing required startup evidence for {target}")
-        scenarios = read_scenarios(github, tag, manifest, platform_directory, startup)
-        if scenarios is None and channel == "candidate":
-            raise ValueError(f"Release is missing required scenarios evidence for {target}")
-        checksum = github.download(tag, asset_name(target) + ".sha256", platform_directory)
-        archive = platform_directory / asset_name(target)
+        startup = read_startup(github, saved_tag, manifest, platform_directory)
+        if startup is None and (channel == "candidate" or platform_releases):
+            raise ValueError(f"Release is missing required startup evidence for {item}")
+        scenarios = read_scenarios(github, saved_tag, manifest, platform_directory, startup)
+        if scenarios is None and (channel == "candidate" or platform_releases):
+            raise ValueError(f"Release is missing required scenarios evidence for {item}")
+        checksum = github.download(saved_tag, asset_name(item) + ".sha256", platform_directory)
+        archive = platform_directory / asset_name(item)
         expected = f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
         if checksum.read_text() != expected:
             raise ValueError("Release checksum mismatch")
-        platform_evidence = evidence_for(evidence, target)
+        platform_evidence = evidence_for(evidence, item)
         validation = "from pathlib import Path; from publish_plugin import authorize; import sys; " \
                      "authorize(Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]) if sys.argv[3] else None)"
         subprocess.run([sys.executable, "-c", validation, str(package), channel,
                         str(platform_evidence) if platform_evidence else ""], cwd=checkout / "scripts", check=True)
         packages.append((package, platform_evidence))
+    for saved_tag, release in releases.items():
+        ensure_immutable(github, saved_tag, release, channel)
+    if rehearsal:
+        return {"status": "published", "channel": None, "reference": reference,
+                "tag": tag, "source": source}
+    arguments = [sys.executable, str(checkout / "scripts/publish_plugin.py"),
+                 "--repository", f"https://github.com/{github.repository}.git", "--channel", channel]
+    arguments.extend(["--packages", *(str(package) for package, _ in packages)])
+    if target:
+        arguments.append("--allow-superseded")
+    for package, platform_evidence in packages:
+        if platform_evidence:
+            arguments.extend(["--evidence", str(platform_evidence)])
+    publication = subprocess.run(arguments, cwd=checkout, check=True, text=True, capture_output=bool(target))
+    if channel == "stable":
+        for saved_tag in releases:
+            github.edit(saved_tag, prerelease=False, make_latest="false" if platform_releases else "true")
+    outcome = json.loads(publication.stdout) if target else {}
+    return {"status": outcome.get("status", "published"), "channel": channel,
+            "tag": tags[target] if target else tag, "source": source, "releases": tags}
+
+
+def ensure_immutable(github, tag, release, channel):
     if release["draft"]:
         if channel == "stable":
             raise ValueError("Publish and validate a candidate before promoting stable")
@@ -358,19 +392,6 @@ def publish_saved(github, tag, source, channel, evidence, directory, reference="
     if (not isinstance(published, dict) or published.get("immutable") is not True
             or published.get("draft") is not False):
         raise ValueError("Release must be immutable and published before updating channels")
-    if rehearsal:
-        return {"status": "published", "channel": None, "reference": reference,
-                "tag": tag, "source": source}
-    arguments = [sys.executable, str(checkout / "scripts/publish_plugin.py"),
-                 "--repository", f"https://github.com/{github.repository}.git", "--channel", channel]
-    arguments.extend(["--packages", *(str(package) for package, _ in packages)])
-    for package, platform_evidence in packages:
-        if platform_evidence:
-            arguments.extend(["--evidence", str(platform_evidence)])
-    subprocess.run(arguments, cwd=checkout, check=True)
-    if channel == "stable":
-        github.edit(tag, prerelease=False, make_latest="true")
-    return {"status": "published", "channel": channel, "tag": tag, "source": source}
 
 
 def evidence_for(index, target):
@@ -415,22 +436,30 @@ def main():
         return 0
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
+        target = arguments.target if arguments.reference == "refs/heads/main" else None
         if arguments.channel == "candidate":
-            github.ensure_draft(tag, source)
+            if arguments.local and target is None and arguments.reference == "refs/heads/main":
+                target = command(["rustc", "-vV"]).split("host: ")[1].splitlines()[0]
+            if target is not None:
+                require_main_ancestor(github, source)
+            saved_tag = platform_tag(tag, target) if target else tag
+            github.ensure_draft(saved_tag, source)
             if arguments.local:
-                target = arguments.target or command(["rustc", "-vV"]).split("host: ")[1].splitlines()[0]
-                if target not in TARGETS:
+                native = target or arguments.target or command(["rustc", "-vV"]).split("host: ")[1].splitlines()[0]
+                if native not in TARGETS:
                     raise ValueError(f"Unsupported native platform: {target}")
-                save_platform(github, tag, target, source, directory,
+                save_platform(github, saved_tag, native, source, directory,
                               arguments.startup_report, arguments.fixture)
                 if arguments.save_only:
-                    print(json.dumps({"status": "saved", "tag": tag, "target": target}))
+                    print(json.dumps({"status": "saved", "tag": saved_tag, "target": native}))
                     return 0
-        elif github.release(tag) is None:
-            raise ValueError("No saved candidate exists for this version")
-        result = publish_saved(github, tag, source, arguments.channel, evidence, directory, arguments.reference)
+        elif arguments.target:
+            parser.error("stable requires evidence for both platforms")
+        split = arguments.channel == "stable" and any(github.release(platform_tag(tag, item)) for item in TARGETS)
+        result = publish_saved(github, tag, source, arguments.channel, evidence, directory,
+                               arguments.reference, target=target, platform_releases=split)
         print(json.dumps(result))
-        return 0 if result["status"] == "published" else 1
+        return 0 if result["status"] in ("published", "superseded") else 1
 
 
 if __name__ == "__main__":
