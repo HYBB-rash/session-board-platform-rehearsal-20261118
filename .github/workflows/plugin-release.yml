@@ -4,180 +4,153 @@ on:
     branches: [main]
   schedule:
     - cron: "*/10 * * * *"
+  workflow_run:
+    workflows: [Check merge candidates]
+    types: [completed]
+    branches: ["codex/integration-*"]
   workflow_dispatch:
     inputs:
+      source:
+        type: string
+        description: Exact main source SHA to publish again
+      platform:
+        type: choice
+        default: both
+        options: [both, linux, mac]
       exercise_failure:
         type: boolean
         default: false
-        description: Fail before publication to verify the previous channels remain usable
+        description: Fail before publication
       exercise_hold_seconds:
         type: choice
         default: "0"
         options: ["0", "120", "300"]
-        description: Hold before publication for the continuous-main-update exercise
-permissions:
-  contents: read
-  actions: read
-concurrency:
-  group: plugin-main-release
-  cancel-in-progress: false
+permissions: {}
+env:
+  GH_TOKEN: ${{ github.token }}
+  RUSTUP_TOOLCHAIN: 1.99.1
+  GIT_AUTHOR_NAME: Codex plugin publisher
+  GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+  GIT_COMMITTER_NAME: Codex plugin publisher
+  GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+  REQUESTED: ${{ inputs.source || github.event.workflow_run.head_sha || github.sha }}
+  EXERCISE_FAILURE: ${{ inputs.exercise_failure || false }}
+  EXERCISE_HOLD: ${{ inputs.exercise_hold_seconds || '0' }}
 jobs:
-  source:
-    name: Pin main release
+  linux:
+    name: Release (x86_64-unknown-linux-gnu)
+    if: github.ref == 'refs/heads/main' && github.event_name != 'workflow_run' && inputs.platform != 'mac'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
-      statuses: write
-    outputs:
-      source: ${{ steps.select.outputs.source }}
-      main: ${{ steps.select.outputs.main }}
-      version: ${{ steps.select.outputs.version }}
-      tag: ${{ steps.select.outputs.tag }}
-      published: ${{ steps.select.outputs.published }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - id: select
-        run: ./scripts/release main select ${{ (inputs.exercise_failure || inputs.exercise_hold_seconds != '' && inputs.exercise_hold_seconds != '0') && '--exercise' || '' }} --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/source.json"
-      - run: git checkout --detach "${{ steps.select.outputs.source }}"
-      - run: ./scripts/release main verify --output "$RUNNER_TEMP/merge-evidence"
-        if: steps.select.outputs.published != 'true'
-      - run: ./scripts/release main record --source "${{ steps.select.outputs.source }}" --state pending
-        if: inputs.exercise_failure != true && steps.select.outputs.published != 'true'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-source
-          path: |
-            ${{ runner.temp }}/source.json
-            ${{ runner.temp }}/merge-evidence/
-  package:
-    name: Package (${{ matrix.target }})
-    needs: source
-    if: needs.source.outputs.published != 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: macos-26
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
+    concurrency:
+      group: plugin-release-linux-${{ inputs.source || github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: write
+      actions: read
+      statuses: write
+      issues: write
+      pull-requests: write
     env:
-      GH_TOKEN: ${{ github.token }}
-      RUSTUP_TOOLCHAIN: 1.99.1
-    steps:
+      TARGET: x86_64-unknown-linux-gnu
+    steps: &release
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.source.outputs.source }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -m pip install -r requirements-delivery.txt
-      - run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Pin main source
+        id: source
+        shell: bash
+        run: |
+          [[ "$REQUESTED" =~ ^[0-9a-f]{40}$ ]]
+          options=()
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then options+=(--allow-unmerged); fi
+          if [[ "$EXERCISE_FAILURE" == true || "$EXERCISE_HOLD" != 0 ]]; then options+=(--exercise); fi
+          ./scripts/release main select --source "$REQUESTED" --target "$TARGET" "${options[@]}" \
+            --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/source.json"
+      - name: Verify frozen candidate evidence
+        id: verify
+        if: steps.source.outputs.source != '' && steps.source.outputs.published != 'true'
+        env:
+          SOURCE: ${{ steps.source.outputs.source }}
+        shell: bash
+        run: |
+          git checkout --detach "$SOURCE"
+          ./scripts/release main verify --target "$TARGET" --defer-pending \
+            --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/merge-evidence"
       - uses: actions/cache@v4
+        if: steps.verify.outcome == 'success' && steps.verify.outputs.deferred != 'true'
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cache/codex-session-board/checker
             target
-          key: release-${{ matrix.target }}-1.99.1-${{ hashFiles('Cargo.lock') }}-${{ needs.source.outputs.source }}
+          key: release-${{ env.TARGET }}-1.99.1-${{ hashFiles('Cargo.lock') }}-${{ steps.source.outputs.source }}
           restore-keys: |
-            release-${{ matrix.target }}-1.99.1-${{ hashFiles('Cargo.lock') }}-
-            candidate-${{ matrix.target }}-1.99.1-${{ hashFiles('Cargo.lock') }}-
-      - run: |
+            release-${{ env.TARGET }}-1.99.1-${{ hashFiles('Cargo.lock') }}-
+            candidate-${{ env.TARGET }}-1.99.1-${{ hashFiles('Cargo.lock') }}-
+      - name: Build, package and start in isolation
+        id: package
+        if: steps.verify.outcome == 'success' && steps.verify.outputs.deferred != 'true'
+        shell: bash
+        run: |
+          python3 -m pip install -r requirements-delivery.txt
+          rustup toolchain install 1.99.1 --profile minimal
           cargo fetch --locked
           cargo fetch --locked --manifest-path scripts/checker/Cargo.toml
-      - run: cargo build --locked --offline --example dev_fixture
-      - run: TMPDIR=/tmp ./scripts/release candidate --local --save-only --target "${{ matrix.target }}" --fixture "$PWD/target/debug/examples/dev_fixture" --startup-report "$RUNNER_TEMP/startup/STARTUP.json"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: release-startup-${{ matrix.target }}
-          path: ${{ runner.temp }}/startup/
-  publish:
-    name: Publish immutable plugins
-    needs: [source, package]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GIT_AUTHOR_NAME: Codex plugin publisher
-      GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-      GIT_COMMITTER_NAME: Codex plugin publisher
-      GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-      EXERCISE_FAILURE: ${{ inputs.exercise_failure || false }}
-      EXERCISE_HOLD: ${{ inputs.exercise_hold_seconds || '0' }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source.outputs.source }}
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Exercise before publication
+          cargo build --locked --offline --example dev_fixture
+          TMPDIR=/tmp ./scripts/release candidate --local --save-only --target "$TARGET" \
+            --fixture "$PWD/target/debug/examples/dev_fixture" --startup-report "$RUNNER_TEMP/startup/STARTUP.json"
+      - name: Publish this platform
+        id: publish
+        if: steps.package.outcome == 'success'
+        shell: bash
         run: |
           case "$EXERCISE_HOLD" in 0|120|300) sleep "$EXERCISE_HOLD";; *) exit 2;; esac
           test "$EXERCISE_FAILURE" != true
-      - run: |
           gh auth setup-git
-          ./scripts/release candidate --finalize
-  result:
-    name: Record publication
-    if: always()
-    needs: [source, package, publish]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      statuses: write
-      issues: write
-      pull-requests: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      SOURCE: ${{ needs.source.outputs.source || github.sha }}
-      PUBLISHED: ${{ needs.publish.result }}
-      ALREADY_PUBLISHED: ${{ needs.source.outputs.published }}
-      SOURCE_RESULT: ${{ needs.source.result }}
-      PACKAGE_RESULT: ${{ needs.package.result }}
-      EXERCISE_FAILURE: ${{ inputs.exercise_failure || false }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: |
+          ./scripts/release candidate --finalize --target "$TARGET" | tee "$RUNNER_TEMP/publication.json"
+      - name: Record this platform
+        if: always() && steps.source.outputs.source != '' && steps.verify.outputs.deferred != 'true'
+        env:
+          SOURCE: ${{ steps.source.outputs.source }}
+          PUBLISHED: ${{ steps.publish.outcome == 'success' || steps.source.outputs.published == 'true' }}
+          PHASE: ${{ steps.verify.outcome == 'failure' && 'verify' || steps.package.outcome == 'failure' && 'package' || 'publish' }}
+        shell: bash
+        run: |
           state=failure
-          test "$PUBLISHED" != success || state=success
-          test "$ALREADY_PUBLISHED" != true || state=success
-          exercise=()
-          test "$EXERCISE_FAILURE" != true || exercise=(--exercise)
-          phase=publish
-          test "$PACKAGE_RESULT" != failure || phase=package
-          test "$SOURCE_RESULT" != failure || phase=source
-          ./scripts/release main record --source "$SOURCE" --state "$state" --phase "$phase" "${exercise[@]}" --output "$RUNNER_TEMP/RELEASE.json"
+          options=()
+          if [[ "$PUBLISHED" == true ]]; then state=success; fi
+          if [[ "$EXERCISE_FAILURE" == true ]]; then options+=(--exercise); fi
+          ./scripts/release main record --source "$SOURCE" --target "$TARGET" --state "$state" \
+            --phase "$PHASE" "${options[@]}" --output "$RUNNER_TEMP/RELEASE.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: release-result
-          path: ${{ runner.temp }}/RELEASE.json
+          name: release-${{ env.TARGET }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/source.json
+            ${{ runner.temp }}/merge-evidence/
+            ${{ runner.temp }}/startup/
+            ${{ runner.temp }}/publication.json
+            ${{ runner.temp }}/RELEASE.json
+  mac:
+    name: Release (aarch64-apple-darwin)
+    if: >-
+      github.ref == 'refs/heads/main' && inputs.platform != 'linux' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: macos-26
+    timeout-minutes: 30
+    concurrency:
+      group: plugin-release-mac-${{ inputs.source || github.event.workflow_run.head_sha || github.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+      statuses: write
+    env:
+      TARGET: aarch64-apple-darwin
+    steps: *release
