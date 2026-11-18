@@ -464,6 +464,26 @@ class SavedReleaseTests(unittest.TestCase):
         self.assertTrue(self.github.draft)
         self.assertEqual(self.github.edits, [])
 
+    def test_split_candidate_finalizes_only_its_platform_and_stable_requires_the_pair(self):
+        self.save_existing()
+        with patch.object(release_plugin, "source_checkout"), \
+                patch.object(release_plugin.subprocess, "run", return_value=SimpleNamespace(stdout="{}")) as run:
+            result = release_plugin.publish_saved(self.github, self.tag, self.github.source, "candidate",
+                                                 None, self.root, target=self.target)
+            self.assertEqual(result["status"], "published")
+            self.assertEqual(result["tag"], release_plugin.platform_tag(self.tag, self.target))
+            self.assertIn("--allow-superseded", run.call_args.args[0])
+            self.assertNotIn("aarch64-apple-darwin", " ".join(run.call_args.args[0]))
+        for tag_source in (self.github.source, "b" * 40):
+            pending = self.root / tag_source
+            pending.mkdir()
+            with patch.object(self.github, "api", return_value={"sha": tag_source}), \
+                    patch.object(release_plugin, "source_checkout") as checkout, \
+                    self.assertRaisesRegex(ValueError, "missing required platform|different source"):
+                release_plugin.publish_saved(self.github, self.tag, self.github.source, "stable",
+                                             self.root / "evidence.json", pending, platform_releases=True)
+            checkout.assert_not_called()
+
     def test_cli_incomplete_finalize_fails_and_automatic_candidate_dispatches_main(self):
         with patch.object(release_plugin, "GitHub", return_value=self.github), \
                 patch.object(release_plugin, "command", side_effect=[self.github.source, ""]), \

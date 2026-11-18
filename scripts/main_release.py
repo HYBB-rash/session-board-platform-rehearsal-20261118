@@ -134,11 +134,13 @@ def record_platform(repository, source, state, run, target, exercise=False, phas
     job = next((item for item in jobs["jobs"] if item["name"] == f"Release ({target})"), None)
     result = {"target": target, "source": source, "state": state, "run": run,
               "attempt": attempt, "job": job["id"] if job else None,
+              "failed_steps": [step["name"] for step in job.get("steps", [])
+                               if step["conclusion"] == "failure"] if job else [],
               "phase": phase, "url": job["html_url"] if job else url, "published": current}
     if exercise:
         return result
     forge.api(f"statuses/{source}", "POST", state=state, context=release_context(target),
-              description=f"{phase}: {state}", target_url=url)
+              description=f"{phase}: {state}", target_url=result["url"])
     if target == "x86_64-unknown-linux-gnu":
         from scripts.main_release_feedback import failure, recovered
         if state == "failure" and observed != source and not covered:

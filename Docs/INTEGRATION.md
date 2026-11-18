@@ -110,21 +110,19 @@ MCP可执行文件、所选客户端的父子进程关系及检查期间进程�
 dispatch 有界重试，故障不改变已经完成的合并，回执保留 pending、错误和重试命令。
 同一发布工作流每十分钟调和一次，补偿遗漏触发；已发布实现直接复用，不重新产包。
 
-工作流共用一个 concurrency group，`cancel-in-progress: false`：
-正在运行的固定源码继续完成；最多保留一个等待任务，更新请求替换旧等待任务。
-任务取得执行权后只选取一次最新 main，实现提交与版本随后固定，不在构建中途换源码。
-GitHub 不保证等待任务顺序，因此不能按触发事件的旧 SHA 发包。
-只改普通 context 记录时沿第一父链复用前一个实现提交，包继续标注真实源码；
-两平台渠道、不可变 Release 与版本标签已经一致时直接记录 covered，不再构建。
+两平台发布 job 按平台和请求 SHA 分组。每个 job 使用事件或手动输入的提交，
+确认它在 `main` 历史中后固定实现 SHA。纯记录提交沿第一父链复用前一个实现。
+候选运行结束时另行唤起 Mac 发布，以接续合并时尚未完成的 Mac 验证。
+按平台和版本读回已发布的包。渠道提交使用版本防倒退和 Git lease。
 
-发布入口核对同源码的双平台合并证据，不重复运行 Clippy 或整套业务测试。
+发布入口核对同源码的候选 job 和对应平台报告，不重复运行 Clippy 或整套业务测试。
 本阶段构建 release 二进制和当前源码 fixture，检查包内容、摘要、真实隔离启动、
 配置漂移、MCP 错误退出、错误后台零字节、服务提前退出及侧栏归属。
 正常启动仅在场景组执行一次，成功记录作为 STARTUP 证据。
-平台包、校验和、STARTUP 和 SCENARIOS 保存在同一版本的 draft Release，
-读回后才可冻结；缺少任一平台的有效证据不能发布。
+平台包、校验和、STARTUP 和 SCENARIOS 保存在该平台的 draft Release，
+全部读回后冻结并推进该平台的候选渠道。
 重试复用已经验证的不可变资产，不能覆盖同名不同内容。
-最终一次原子 Git push 更新两个候选渠道，避免一新一旧；stable 仍需完整外部验收。
+`stable` 读取同源码同版本两份不可变包和完整外部验收证据，原子更新两条渠道。
 
 ```sh
 ./scripts/release main status --source MAIN_SHA
@@ -132,11 +130,12 @@ GitHub 不保证等待任务顺序，因此不能按触发事件的旧 SHA 发�
 ```
 
 队列的 `batch_merged` 和 `merge_status=merged` 表示已进入 main；
-`release_status=pending/failed/published` 单独表示发布进度。
-`pr-queue status` 会读回发布状态；后继发布包含该提交时显示 covered。
+`release_status` 表示 Linux 发布进度。`platforms` 分别显示每个平台的渠道和最新尝试。
+`pr-queue status` 会读回发布状态。后继发布包含该提交时显示 `covered`。
 旧 `batch_delivered` 仅兼容历史记录，不再作为新合并完成条件。
-发布失败不会回退 main 或覆盖上一可用包；GitHub 的 `Plugin release` 状态和
-`release-blocker` 工单保存源码、失败运行及上一可用版本，相关已合并 PR 收到作者反馈。
+发布失败保留上一可用包。Linux 发布失败仍走 `release-blocker` 和 PR 反馈。
+Mac 发布失败记录在实际源码的 `Plugin release (aarch64-apple-darwin)` 状态及
+`release-aarch64-apple-darwin-<attempt>` Artifact 中，Mac job 链接指向对应运行日志。
 已归档的作者会话不会因此自动复活，作者应从工单启动独立修复任务。
 真实故障未恢复时，推广只接受提交消息使用 `Release-Fix: #工单编号` 的修复。
 此标记不会在合并时提前关闭工单。基础设施问题记录阶段和原因；
@@ -152,15 +151,20 @@ hold 只是推迟真实发布；其间发现的真实构建或启动失败仍按
 检查包内启动器的 MCP 握手、界面资源、HTTP 服务身份及依赖就绪，关闭本次全部进程。
 失败、跳过、身份错误、清理失败或报告与退出码不一致均拒绝发布。
 缓存只复用依赖和编译产物，不复用其他源码的成功记录。
-失败重跑使用 Actions 的失败任务重试及已有 Release 包，不重建已确认的平台包。
+Mac 失败后先读 `./scripts/release main status --source SHA`，按 SHA 找到该平台的
+run、attempt 和 `Release (aarch64-apple-darwin)` job。确认 `source.json`
+或 `RELEASE.json` 的真实打包 SHA 后执行 `gh run rerun RUN_ID --job JOB_ID --repo OWNER/REPO`。
+超过 Actions 重跑期限时，用
+`gh workflow run plugin-release.yml --ref main -f platform=mac -f source=SHA --repo OWNER/REPO`。
+重试复用该 SHA 的已确认资产，只推进 Mac 渠道。若 Mac 渠道已有更新版本，旧尝试保留在历史。
 主线推送只触发独立发布，不重复整套合并门禁；主线接收已验证候选的同一提交。
 
 仅更新 `context/` 内普通 Markdown、JSON 和 YAML 记录时，允许记录专用门禁。
 工作流先确认主线为祖先，全部非记录文件的 Git 树与主线完全相同，
 再确认该主线头具有 Actions 的成功 `Candidate gate`，执行项目检查与上下文检查。
 该路径保留当前不可变插件包的原始源码身份，不升版、不构建、不重新发布。
-任何代码、测试、检查器、工作流、版本或其他路径变化均走双平台候选门禁，
-再按上述保守范围选择测试，不能进入记录专用门禁。
+其他路径的改动均走候选验证。Linux job 决定实现改动的 `Candidate gate`，
+Mac job 独立验证同一个提交，并作为 Mac 发布依据。
 汇总门禁要求分类及所选验证路径实际成功，路径失败或意外跳过均阻止主线更新。
 记录同步须正常快进，推送前再次确认主线仍为检查报告中的基线。
 
@@ -171,7 +175,7 @@ hold 只是推迟真实发布；其间发现的真实构建或启动失败仍按
   --run ACTIONS_RUN_ID --repository OWNER/REPO --output /tmp/promotion.json
 ```
 
-入口检查正确仓库和工作流、分类及四项候选任务各自成功、双平台源码身份、报告和日志摘要，
+入口检查正确仓库和工作流、分类、Linux 和 `Candidate gate` job 成功，以及源码身份、报告和日志摘要，
 重新计算范围和完整清单。验证记录下载一次并保留在回执旁，推进前再核对最终 PR 检查、
 发布故障工单及准确主线基线，以祖先检查和 lease 完成快进并读回确认。
 主线推进后立即保存合并回执，再有界触发独立发布；不下载插件包或等待包启动。
@@ -182,7 +186,7 @@ GitHub 默认使用已有 `gh` 登录；自动环境可用 `CODEX_GITHUB_COMMAND
 服务端主线保护要求 `Candidate gate` 成功、分支为最新，并禁止强推及删除。
 仓库权限不足以配置时必须明确报告保护未生效，不能把本地脚本等同服务端保护。
 合并计时从开始处理固定 PR 头，到主线确认同一候选为止。
-发布从 main 更新另行计时，到双平台不可变插件包发布完成为止。
+发布从 main 更新另行计时，分别以该平台不可变包及渠道确认结束。
 调查、规则开发和计时结束后的记录收尾分别列出，不混入合并时间。
 以后部署使用候选渠道中同一源码身份的包，客户端加载和功能验收单独计时。
 

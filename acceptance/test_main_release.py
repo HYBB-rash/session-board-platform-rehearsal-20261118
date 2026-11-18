@@ -115,6 +115,26 @@ class MainReleaseTests(unittest.TestCase):
         self.assertEqual(result["release_status"], "covered")
         self.assertEqual(result["covered_by"], "newer")
 
+    def test_late_mac_failure_only_records_its_own_source_and_platform(self):
+        mac = "aarch64-apple-darwin"
+        linux = "x86_64-unknown-linux-gnu"
+        current = {target: {"source_commit": "newer", "version": "0.3.98"} for target in release.TARGETS}
+        forge = Mock()
+        forge.api.return_value = {"jobs": [{"id": 12, "name": f"Release ({mac})", "html_url": "job-url"}]}
+        with patch.object(release, "GitHub", return_value=forge), \
+                patch.object(release, "channels", return_value=current), \
+                patch.object(release, "ancestor", return_value=True), \
+                patch("scripts.main_release_feedback.failure") as failure:
+            record = release.record_platform("owner/repo", "older", "failure", 9, mac, phase="package")
+            failure.assert_not_called()
+        self.assertEqual((record["job"], record["source"], record["target"]), (12, "older", mac))
+        writes = [call for call in forge.api.call_args_list if len(call.args) > 1]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0].args, ("statuses/older", "POST"))
+        self.assertEqual(writes[0].kwargs["context"], release.release_context(mac))
+        states = release.platform_status("newer", "newer", True, current, {mac: None, linux: None})
+        self.assertEqual({item["release_status"] for item in states["platforms"].values()}, {"published"})
+
     def test_missing_immutable_release_or_wrong_tag_cannot_skip_publication(self):
         selected = {"source": "source", "version": "0.3.98", "tag": "v0.3.98"}
         manifests = {target: {"source_commit": "source", "version": "0.3.98", "target": target}

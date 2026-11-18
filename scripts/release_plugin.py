@@ -208,8 +208,10 @@ def read_package(github, tag, target, source, directory):
         raise ValueError("GitHub asset digest is missing or does not match downloaded bytes")
     package = directory / "package"
     manifest = unpack(archive, package)
-    version = versions(ROOT) if tag == f"rehearsal-{source}" else tag[1:]
-    if (manifest["source_commit"], manifest["version"], manifest["target"]) != (source, version, target):
+    version_tag = f"v{manifest['version']}"
+    matches_version = (manifest["version"] == versions(ROOT) if tag == f"rehearsal-{source}"
+                       else tag in (version_tag, platform_tag(version_tag, target)))
+    if (manifest["source_commit"], manifest["target"]) != (source, target) or not matches_version:
         raise ValueError("Saved package belongs to different source, version or platform")
     return package
 

@@ -104,6 +104,20 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual({str(package): (package / "RELEASE.json").read_bytes() for package, _ in packages}, contents)
             single = publish_plugin.publish(str(repository), packages[0][0], "candidate")
             self.assertEqual(single, published[0])
+            newer_linux = self.platform_package(targets[1], "0.2.96")
+            late_mac = self.platform_package(targets[0], "0.2.95")
+            publish_plugin.publish(str(repository), newer_linux, "candidate")
+            linux_ref = next(line for line in references().splitlines() if targets[1] in line)
+            publish_plugin.publish(str(repository), late_mac, "candidate")
+            self.assertIn(linux_ref, references().splitlines())
+            publish_plugin.publish(str(repository), self.platform_package(targets[0], "0.2.96"), "candidate")
+            both_newer = references()
+            with self.assertRaises(publish_plugin.ChannelSuperseded):
+                publish_plugin.publish(str(repository), late_mac, "candidate")
+            self.assertEqual(references(), both_newer)
+            with self.assertRaisesRegex(ValueError, "requires both platform packages"):
+                publish_plugin.publish_many(str(repository), [(newer_linux, None)], "stable")
+            self.assertEqual(references(), both_newer)
 
     def test_second_platform_rejection_cannot_change_either_channel(self):
         second = self.platform_package("aarch64-apple-darwin", "0.2.93")
