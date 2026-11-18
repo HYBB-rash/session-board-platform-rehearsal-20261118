@@ -140,8 +140,8 @@ class RehearsalTargetTests(unittest.TestCase):
         checks = []
         original_run = subprocess.run
 
-        def collect(repository, run_id, label, observed, base, directory, reference):
-            self.assertEqual(reference, self.reference)
+        def collect(repository, run_id, label, observed, base, directory, job):
+            self.assertEqual(job["name"], f"Candidate ({label})")
             checks.append((label, observed, base))
             return label, {"validated": True}, {"package": True}
 
@@ -155,12 +155,15 @@ class RehearsalTargetTests(unittest.TestCase):
                 patch.object(promotion, "identity", return_value=source), \
                 patch.object(promotion, "git", side_effect=context.git), \
                 patch.object(promotion, "github", side_effect=[json.dumps(run), "{}"]), \
-                patch.object(promotion, "validate_run"), \
+                patch.object(promotion, "validate_run", return_value={
+                    name: {"name": name} for name in promotion.JOBS
+                }) as validate, \
                 patch.object(promotion, "collect_platform", side_effect=collect), \
                 patch.object(promotion.subprocess, "run", side_effect=command):
             receipt = promotion.promote(source["commit"], self.base, 1, "fixture/repo",
                                         output, self.reference)
         self.assertEqual({entry[0] for entry in checks}, set(promotion.PLATFORMS))
+        self.assertEqual(validate.call_args.args[-1], promotion.JOBS)
         self.assertTrue(all(entry[1:] == (source, self.base) for entry in checks))
         self.assertEqual(receipt["reference"], self.reference)
         self.assertEqual(context.require_remote_target(self.reference, (source["commit"],)),
