@@ -82,6 +82,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Test repository candidate controls
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          ref="repos/$GITHUB_REPOSITORY/git/ref/tags"
+          if [[ "$LABEL" == macos-arm64 ]]; then
+            until gh api "$ref/lab-allow-mac-validation-$GITHUB_SHA" --silent 2>/dev/null; do sleep 10; done
+          else
+            if gh api "$ref/lab-fail-linux-validation-$GITHUB_SHA" --silent 2>/dev/null; then exit 23; fi
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

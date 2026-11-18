@@ -97,6 +97,12 @@ jobs:
         if: steps.verify.outcome == 'success' && steps.verify.outputs.deferred != 'true'
         shell: bash
         run: |
+          source_sha=$(git rev-parse HEAD)
+          ref="repos/$GITHUB_REPOSITORY/git/ref/tags"
+          if [[ "$TARGET" == aarch64-apple-darwin ]]; then
+            until gh api "$ref/lab-allow-mac-package-$source_sha" --silent 2>/dev/null; do sleep 10; done
+          fi
+          if gh api "$ref/lab-fail-package-$TARGET-$source_sha" --silent 2>/dev/null; then exit 23; fi
           python3 -m pip install -r requirements-delivery.txt
           rustup toolchain install 1.99.1 --profile minimal
           cargo fetch --locked
@@ -143,7 +149,7 @@ jobs:
       github.ref == 'refs/heads/main' && inputs.platform != 'linux' &&
       (github.event_name != 'workflow_run' || github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 75
     concurrency:
       group: plugin-release-mac-${{ inputs.source || github.event.workflow_run.head_sha || github.sha }}
       cancel-in-progress: false
