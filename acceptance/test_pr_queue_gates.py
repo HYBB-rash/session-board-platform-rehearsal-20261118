@@ -85,6 +85,19 @@ class PRQueueGateTests(unittest.TestCase):
                 mock.patch.object(gates.forge, "pages", return_value=[]):
             self.assertIsNone(gates.verify(self.gates))
 
+    def test_only_the_verified_mac_candidate_is_advisory_for_pr_checks(self):
+        checks = [{"head_sha": HEAD, "name": "changes", "status": "completed", "conclusion": "success"},
+                  {"head_sha": HEAD, "name": "Candidate (macos-arm64)", "status": "in_progress",
+                   "conclusion": None, "app": {"id": 15368},
+                   "details_url": "https://github.com/owner/repo/actions/runs/11/job/22"}]
+        run = {"head_sha": HEAD, "head_branch": "codex/integration-example",
+               "path": ".github/workflows/plugin-candidate.yml"}
+        for source, state in ((run, "passed"), ({**run, "path": ".github/workflows/pr-checks.yml"}, "pending")):
+            with self.subTest(state=state), \
+                    mock.patch.object(gates.forge, "pages", side_effect=[checks, []]), \
+                    mock.patch.object(gates.forge, "api", return_value=source):
+                self.assertEqual(gates.forge.check_state("owner/repo", HEAD, ["changes"], 60)["ci"], state)
+
     def test_workflow_proof_requires_the_exact_pr_head_workflow_and_successful_job(self):
         run = {"id": 1, "run_attempt": 2, "head_sha": HEAD, "event": "pull_request",
                "path": ".github/workflows/pr-checks.yml", "repository": {"full_name": "owner/repo"},

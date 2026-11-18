@@ -144,6 +144,21 @@ def feedback(pr, reviews, comments, inline, roots, reviewers):
     return result
 
 
+def advisory_mac_candidate(repository, head, entry, deadline):
+    if entry["name"] != "Candidate (macos-arm64)" or entry.get("app", {}).get("id") != 15368:
+        return False
+    prefix = f"https://github.com/{repository}/actions/runs/"
+    details = entry.get("details_url") or ""
+    if not details.startswith(prefix):
+        return False
+    match = re.fullmatch(r"(\d+)/job/\d+", details[len(prefix):])
+    if not match:
+        return False
+    run = api(f"repos/{repository}/actions/runs/{match[1]}", deadline=deadline)
+    return (run["head_sha"] == head and run["path"] == ".github/workflows/plugin-candidate.yml"
+            and run["head_branch"].startswith("codex/integration-"))
+
+
 def check_state(repository, head, required, deadline):
     endpoint = f"repos/{repository}"
     result = {"ci": "pending", "items": []}
@@ -152,10 +167,16 @@ def check_state(repository, head, required, deadline):
     statuses = pages(f"{endpoint}/commits/{head}/statuses", deadline)
     latest = {}
     for entry in statuses:
+        if entry["context"] == "Plugin release (aarch64-apple-darwin)" and entry["context"] not in required:
+            continue
         latest.setdefault(entry["context"], entry)
+    blocking_checks = []
     for entry in checks:
         if entry["head_sha"] != head:
             raise ForgeError("Check run belongs to a different commit")
+        if entry["name"] not in required and advisory_mac_candidate(repository, head, entry, deadline):
+            continue
+        blocking_checks.append(entry)
         if entry["status"] == "completed" and entry["conclusion"] in {
             "failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale",
         }:
@@ -172,7 +193,7 @@ def check_state(repository, head, required, deadline):
                 "body": f"{entry['context']}: {entry['state']}", "url": entry.get("target_url"),
             })
     conclusions = {entry["name"]: entry["conclusion"] if entry["status"] == "completed" else "pending"
-                   for entry in checks}
+                   for entry in blocking_checks}
     conclusions.update({name: entry["state"] for name, entry in latest.items()})
     if any(entry["kind"] == "check" for entry in result["items"]):
         result["ci"] = "failed"
@@ -180,7 +201,7 @@ def check_state(repository, head, required, deadline):
           and all(entry["status"] == "completed"
                   and entry["conclusion"] in (
                       {"success"} if entry["name"] in required else {"success", "neutral", "skipped"})
-                  for entry in checks)
+                  for entry in blocking_checks)
           and all(entry["state"] == "success" for entry in latest.values())):
         result["ci"] = "passed"
     return result

@@ -2171,6 +2171,7 @@
       "acceptance.test_pr_queue_gates.PRQueueGateTests.test_already_merged_retry_still_requires_checks_on_the_exact_head",
       "acceptance.test_pr_queue_gates.PRQueueGateTests.test_gate_manifest_binds_the_real_queue_candidate_and_accepted_sources",
       "acceptance.test_pr_queue_gates.PRQueueGateTests.test_only_the_current_head_with_successful_checks_and_no_feedback_can_pass",
+      "acceptance.test_pr_queue_gates.PRQueueGateTests.test_only_the_verified_mac_candidate_is_advisory_for_pr_checks",
       "acceptance.test_pr_queue_gates.PRQueueGateTests.test_pr_changed_before_snapshot_does_not_reuse_old_ci",
       "acceptance.test_pr_queue_gates.PRQueueGateTests.test_pr_changed_during_workflow_proof_cannot_pass",
       "acceptance.test_integrate.IntegrateTests.test_launcher_uses_the_existing_delivery_environment_before_default_python",
