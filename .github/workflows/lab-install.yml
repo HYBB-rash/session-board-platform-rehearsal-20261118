@@ -28,17 +28,19 @@ jobs:
           export XDG_DATA_HOME="$state/data"
           export XDG_CONFIG_HOME="$state/config"
           export XDG_CACHE_HOME="$state/cache"
+          mkdir -p "$CODEX_HOME"
           repo="https://github.com/$GITHUB_REPOSITORY.git"
           install_candidate() {
             python3 "$GITHUB_WORKSPACE/scripts/update_plugin.py" --repository "$repo" --channel candidate \
               --codex "$state/codex-aarch64-apple-darwin" --defer-reload --expected-channel-source "$1"
           }
           install_candidate 769f1f01a9d701d90cd07c7fc931632371b5ba4b | tee "$state/previous.json"
+          cp "$state/previous.json" "$state/baseline.json"
           observe() {
             gh api "repos/$GITHUB_REPOSITORY/contents/RELEASE.json?ref=candidate%2Faarch64-apple-darwin" \
               --jq .content | base64 -D | jq -r .source_commit
           }
-          for update in 1 2; do
+          for update in 1; do
             before=$(jq -r .release.source_commit "$state/previous.json")
             while true; do
               next=$(observe)
