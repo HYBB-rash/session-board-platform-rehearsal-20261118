@@ -1,0 +1,55 @@
+name: Verify isolated Mac installation
+on:
+  push:
+    branches: [codex/lab-mac-installer]
+permissions:
+  contents: read
+jobs:
+  install:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify isolated installation before and after release
+        shell: bash
+        run: |
+          state="$RUNNER_TEMP/isolated-lab"
+          mkdir "$state"
+          cd "$state"
+          gh release download rust-v0.169.0 --repo openai/codex --pattern codex-aarch64-apple-darwin.tar.gz
+          echo '7f4c49c80bae1d0b4e347acfcdf11faa3475d87ae5e65a5eb1261d3c358145ee  codex-aarch64-apple-darwin.tar.gz' | shasum -a 256 -c
+          tar -xzf codex-aarch64-apple-darwin.tar.gz
+          export CODEX_HOME="$state/codex"
+          export XDG_DATA_HOME="$state/data"
+          export XDG_CONFIG_HOME="$state/config"
+          export XDG_CACHE_HOME="$state/cache"
+          repo="https://github.com/$GITHUB_REPOSITORY.git"
+          install_candidate() {
+            python3 "$GITHUB_WORKSPACE/scripts/update_plugin.py" --repository "$repo" --channel candidate \
+              --codex "$state/codex-aarch64-apple-darwin" --defer-reload --expected-channel-source "$1"
+          }
+          install_candidate 769f1f01a9d701d90cd07c7fc931632371b5ba4b | tee "$state/previous.json"
+          observe() {
+            gh api "repos/$GITHUB_REPOSITORY/contents/RELEASE.json?ref=candidate%2Faarch64-apple-darwin" \
+              --jq .content | base64 -D | jq -r .source_commit
+          }
+          for update in 1 2; do
+            before=$(jq -r .release.source_commit "$state/previous.json")
+            while true; do
+              next=$(observe)
+              if [[ "$next" != "$before" ]]; then break; fi
+              sleep 20
+            done
+            install_candidate "$next" | tee "$state/updated-$update.json"
+            cp "$state/updated-$update.json" "$state/previous.json"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-iso-install-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/isolated-lab/*.json
