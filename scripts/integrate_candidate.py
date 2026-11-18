@@ -9,7 +9,7 @@ import time
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.promote_candidate import ROOT, git, github, identity, promote, promote_context
+from scripts.promote_candidate import JOBS, LINUX_JOBS, ROOT, git, github, identity, promote, promote_context
 from scripts.validate_context import context_only, require_remote_target, require_target
 from scripts import pr_queue_gates
 
@@ -56,20 +56,30 @@ def waiting(state, path, kind):
     return state
 
 
-def failed_run(state, run):
+def failed_run(state, run, jobs):
     state["merge_status"] = "infrastructure-blocked"
     state.pop("failed_jobs", None)
-    if run["conclusion"] == "failure":
-        pages = json.loads(github("api", "--paginate", "--slurp",
-                                 f"repos/{state['repository']}/actions/runs/{run['id']}"
-                                 f"/attempts/{run['run_attempt']}/jobs?per_page=100", timeout=60))
-        state["failed_jobs"] = [job for page in pages for job in page["jobs"]
-                                if job["conclusion"] != "success"]
+    if jobs:
+        state["failed_jobs"] = jobs
         if any(step.get("conclusion") == "failure" and "scripts/validate" in step["name"]
                for job in state["failed_jobs"] if job["name"].startswith("Candidate (")
                for step in job.get("steps", [])):
             state["merge_status"] = "needs-author"
-    raise ValueError(f"Candidate run {run['id']} finished: {run['conclusion']}")
+    raise ValueError(f"Required candidate checks failed for run {run['id']}")
+
+
+def gate_jobs(state, run):
+    endpoint = f"repos/{state['repository']}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100"
+    jobs = json.loads(github("api", endpoint, timeout=60))["jobs"]
+    required = LINUX_JOBS if state.get("reference", "refs/heads/main") == "refs/heads/main" else JOBS
+    if state.get("records_only"):
+        required = {"Classify integration", "Validate context records", "Candidate gate"}
+    observed = [job for job in jobs if job["name"] in required]
+    failed = [job for job in observed if job["status"] == "completed"
+              and job["conclusion"] not in ("success", "skipped")]
+    complete = {job["name"] for job in observed if job["status"] == "completed"
+                and job["conclusion"] == "success"} == required
+    return failed, complete
 
 
 def continue_candidate(state, directory, timeout):
@@ -96,10 +106,13 @@ def continue_candidate(state, directory, timeout):
             state["run_attempt"] = run["run_attempt"]
             state["workflow"] = {key: run.get(key) for key in
                                  ("id", "run_attempt", "status", "conclusion", "html_url")}
+            failed, complete = gate_jobs(state, run)
+            terminal_failure = not complete and (failed or run["status"] == "completed")
+            state["gate_conclusion"] = "success" if complete else "failure" if terminal_failure else None
             save(state_path, state)
-            if run["status"] == "completed":
-                if run["conclusion"] != "success":
-                    failed_run(state, run)
+            if terminal_failure:
+                failed_run(state, run, failed)
+            if complete:
                 break
         if time.monotonic() >= deadline:
             return waiting(state, state_path, "candidate")
@@ -211,7 +224,7 @@ def start(arguments):
         state["seconds"] = (datetime.fromisoformat(state.get("completed_at") or now())
                             - datetime.fromisoformat(state["started_at"])).total_seconds()
         save(path, state)
-        if state.get("workflow", {}).get("conclusion") not in (None, "success"):
+        if state.get("gate_conclusion") == "failure":
             failure = directory / f"failed-run-{state['run']}-{state['run_attempt']}.json"
             if not failure.exists():
                 save(failure, state)

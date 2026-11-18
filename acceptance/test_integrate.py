@@ -47,6 +47,7 @@ class IntegrateTests(unittest.TestCase):
                 "'conclusion':'success' if phase=='completed' else None}\n"
                 "sys.argv=['integrate','--resume','--output',str(folder)]\n"
                 "with patch.object(flow,'require_checkout'), "
+                "patch.object(flow,'gate_jobs',return_value=([], phase=='ready')), "
                 "patch.object(flow,'git',return_value='base refs/heads/main'), "
                 "patch.object(flow.subprocess,'run',side_effect=execute), "
                 "patch.object(flow,'find_run',return_value=run), "
@@ -54,7 +55,7 @@ class IntegrateTests(unittest.TestCase):
                 "    sys.exit(flow.main())\n")
             environment = dict(os.environ, PYTHONPATH=str(integrate.ROOT))
             invocations = []
-            for phase in ("in_progress", "completed", "completed"):
+            for phase in ("in_progress", "ready", "ready"):
                 started = time.monotonic()
                 process = subprocess.run([sys.executable, str(driver), str(directory), phase],
                                          cwd=directory, env=environment, capture_output=True,
@@ -94,6 +95,7 @@ class IntegrateTests(unittest.TestCase):
                     patch.object(integrate, "git", return_value="base refs/heads/main"), \
                     patch.object(integrate.subprocess, "run") as execute, \
                     patch.object(integrate, "find_run", return_value=run), \
+                    patch.object(integrate, "gate_jobs", side_effect=[([], False), ([], True)]), \
                     patch.object(integrate.time, "sleep") as sleep, \
                     patch.object(integrate, "promote", side_effect=promoted) as promote:
                 integrate.start(arguments)
@@ -131,6 +133,7 @@ class IntegrateTests(unittest.TestCase):
                     patch.object(integrate.subprocess, "run"), \
                     patch.object(integrate, "find_run", return_value={
                         "id": 42, "run_attempt": 1, "status": "completed", "conclusion": "success"}), \
+                    patch.object(integrate, "gate_jobs", return_value=([], True)), \
                     patch.object(integrate.pr_queue_gates, "verify", return_value=None), \
                     patch.object(integrate.time, "sleep") as sleep, \
                     patch.object(integrate, "promote") as promote:
@@ -238,10 +241,10 @@ class IntegrateTests(unittest.TestCase):
                     patch.object(integrate, "git", return_value="base refs/heads/main"), \
                     patch.object(integrate.subprocess, "run"), \
                     patch.object(integrate, "find_run", return_value=run), \
-                    patch.object(integrate, "github", return_value=json.dumps([{"jobs": [{
-                        "name": "Candidate (linux-x86_64)", "conclusion": "failure",
+                    patch.object(integrate, "github", return_value=json.dumps({"jobs": [{
+                        "name": "Candidate (linux-x86_64)", "status": "completed", "conclusion": "failure",
                         "steps": [{"name": "TMPDIR=/tmp ./scripts/validate", "conclusion": "failure"}],
-                    }]}])), \
+                    }]})), \
                     patch.object(integrate, "promote") as promote, self.assertRaises(ValueError):
                 integrate.start(Namespace(output=directory, resume=True, timeout=10))
             promote.assert_not_called()
@@ -258,10 +261,10 @@ class IntegrateTests(unittest.TestCase):
     def test_runner_failure_is_not_sent_to_author_and_workflow_identity_is_pinned(self):
         state = {"repository": "owner/repo"}
         run = {"id": 42, "run_attempt": 1, "conclusion": "failure"}
-        with patch.object(integrate, "github", return_value=json.dumps([{"jobs": [{
-                "name": "Candidate (macos-arm64)", "conclusion": "failure", "steps": [],
-        }]}])), self.assertRaises(ValueError):
-            integrate.failed_run(state, run)
+        with self.assertRaises(ValueError):
+            integrate.failed_run(state, run, [
+                {"name": "Candidate (linux-x86_64)", "conclusion": "failure", "steps": []},
+            ])
         self.assertEqual(state["merge_status"], "infrastructure-blocked")
         pinned = {**run, "head_sha": "candidate", "head_branch": "branch", "event": "push",
                   "repository": {"full_name": "owner/repo"}, "path": ".github/workflows/plugin-candidate.yml"}
@@ -292,6 +295,7 @@ class IntegrateTests(unittest.TestCase):
                     patch.object(integrate, "git", return_value="base refs/heads/main"), \
                     patch.object(integrate.subprocess, "run"), patch.object(integrate.time, "sleep"), \
                     patch.object(integrate, "find_run", side_effect=find), \
+                    patch.object(integrate, "gate_jobs", return_value=([], True)), \
                     patch.object(integrate.pr_queue_gates, "verify", side_effect=check), \
                     patch.object(integrate, "promote", side_effect=promoted) as promote:
                 integrate.continue_candidate(state, directory, 10)

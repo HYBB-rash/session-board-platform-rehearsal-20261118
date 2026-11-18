@@ -458,7 +458,7 @@ def finish(state, directory):
             "merge_status", "infrastructure-blocked")
         event = "candidate_pending" if pending else "candidate_blocked"
         state["events"].append({"at": now(), event: candidate, "report": str(report)})
-        if re.fullmatch(r"Candidate run \d+ finished: failure", error):
+        if details.get("gate_conclusion") == "failure" or re.fullmatch(r"Candidate run \d+ finished: failure", error):
             author = details.get("merge_status", "needs-author") == "needs-author"
             state["merge_status"] = "needs-author" if author else "infrastructure-blocked"
             if author:
@@ -513,6 +513,8 @@ def refresh_release(state):
 
 
 def retry_candidate(state, directory):
+    from scripts.integrate_candidate import gate_jobs
+
     verify_checker(state)
     frozen = state["frozen_candidate"]
     clean(Path(state["project"]), frozen["candidate"])
@@ -522,9 +524,8 @@ def retry_candidate(state, directory):
         raise ValueError("Retry needs the exact unchanged failed candidate and its recorded workflow attempt")
     run = json.loads(github("api", f"repos/{state['repository']}/actions/runs/{previous['id']}"))
     if (run["id"] != previous["id"] or run["head_sha"] != frozen["candidate"]
-            or run["run_attempt"] <= previous["attempt"]
-            or run["status"] != "completed" or run["conclusion"] != "success"):
-        raise ValueError("Rerun the recorded workflow, then retry-candidate after a newer attempt succeeds")
+            or run["run_attempt"] <= previous["attempt"] or not gate_jobs(state, run)[1]):
+        raise ValueError("Rerun the recorded workflow, then retry-candidate after its required jobs succeed")
     frozen["status"] = "retry-ready"
     state["events"].append({"at": now(), "candidate_retry": frozen["candidate"],
                             "run": run["id"], "run_attempt": run["run_attempt"]})

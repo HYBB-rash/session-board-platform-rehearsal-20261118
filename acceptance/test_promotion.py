@@ -83,6 +83,10 @@ class PromotionTests(unittest.TestCase):
 
     def test_pr_ci_is_checked_again_after_artifacts_and_before_the_main_push(self):
         from scripts import pr_queue_gates
+        self.run.update(status="in_progress", conclusion=None)
+        for job in self.jobs["jobs"]:
+            if job["name"] == "Candidate (macos-arm64)":
+                job.update(status="queued", conclusion=None)
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(promotion, "identity", return_value=self.source), \
                     patch.object(promotion, "git", return_value=""), \
@@ -94,7 +98,8 @@ class PromotionTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "PR checks are pending"):
                 promotion.promote(self.source["commit"], "base", 1, "owner/repo",
                                   Path(temporary) / "receipt.json", pr_gates={"items": [7]})
-            self.assertEqual(collect.call_count, 2)
+            self.assertEqual(collect.call_count, 1)
+            self.assertEqual(collect.call_args.args[2], "linux-x86_64")
             remote.assert_not_called()
             self.assertFalse(any(command.args[0][:2] == ["git", "push"] for command in run.call_args_list))
 
@@ -271,7 +276,7 @@ class PromotionTests(unittest.TestCase):
                     patch.object(promotion, "validate_artifact", return_value={"passed": True}), \
                     patch("release_plugin.GitHub") as release:
                 label, report, package = promotion.collect_platform(
-                    "owner/repo", 1, "macos-arm64", self.source, "base", Path(temporary))
+                    "owner/repo", 1, "macos-arm64", self.source, "base", Path(temporary), {})
                 self.assertEqual((label, report, package), ("macos-arm64", {"passed": True}, None))
                 self.assertEqual(github.call_count, 1)
                 release.assert_not_called()

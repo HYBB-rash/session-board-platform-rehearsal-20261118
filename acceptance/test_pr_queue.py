@@ -653,9 +653,12 @@ class PRQueueTests(unittest.TestCase):
         for changes in ({}, {"run_attempt": 2, "head_sha": prefix}, {"run_attempt": 2, "conclusion": "failure"}):
             with self.subTest(changes=changes), \
                     mock.patch.object(pr_queue, "github", return_value=json.dumps({**record, **changes})), \
-                    self.assertRaisesRegex(ValueError, "newer attempt succeeds"):
+                    mock.patch("scripts.integrate_candidate.gate_jobs", return_value=([], False)), \
+                    self.assertRaisesRegex(ValueError, "required jobs succeed"):
                 pr_queue.retry_candidate(self.state, self.queue)
-        with mock.patch.object(pr_queue, "github", return_value=json.dumps({**record, "run_attempt": 2})), \
+        rerun = {**record, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        with mock.patch.object(pr_queue, "github", return_value=json.dumps(rerun)), \
+                mock.patch("scripts.integrate_candidate.gate_jobs", return_value=([], True)), \
                 mock.patch.object(pr_queue, "finish") as finish:
             pr_queue.retry_candidate(self.state, self.queue)
         finish.assert_called_once_with(self.state, self.queue)

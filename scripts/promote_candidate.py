@@ -15,10 +15,8 @@ from scripts.validate_candidate import ROOT, acceptance_outcome, commands_for, g
 from scripts.validation_report import verify_complete
 from scripts.validate_context import require_remote_target, require_target
 
-JOBS = {
-    "Candidate (linux-x86_64)", "Candidate (macos-arm64)",
-    "Candidate gate", "Classify integration",
-}
+LINUX_JOBS = {"Candidate (linux-x86_64)", "Candidate gate", "Classify integration"}
+JOBS = LINUX_JOBS | {"Candidate (macos-arm64)"}
 PLATFORMS = {"linux-x86_64": ("linux", "x86_64"), "macos-arm64": ("darwin", "arm64")}
 TARGETS = {"linux-x86_64": "x86_64-unknown-linux-gnu", "macos-arm64": "aarch64-apple-darwin"}
 
@@ -32,8 +30,7 @@ def github(*arguments, timeout=None):
 
 
 def validate_run(run, jobs, source, repository, required=JOBS):
-    if (run["head_sha"] != source["commit"] or run["status"] != "completed"
-            or run["conclusion"] != "success" or run["repository"]["full_name"] != repository
+    if (run["head_sha"] != source["commit"] or run["repository"]["full_name"] != repository
             or run["path"] != ".github/workflows/plugin-candidate.yml"
             or run["event"] not in ("push", "workflow_dispatch")
             or not run["head_branch"].startswith("codex/integration-")):
@@ -41,9 +38,16 @@ def validate_run(run, jobs, source, repository, required=JOBS):
     records = {job["name"]: job for job in jobs["jobs"]}
     if not required.issubset(records) or any(
         records[name]["status"] != "completed" or records[name]["conclusion"] != "success"
+        or records[name].get("head_sha", run["head_sha"]) != run["head_sha"]
         for name in required
     ):
         raise ValueError("Required candidate jobs must each finish successfully")
+    return records
+
+
+def artifact_name(name, job):
+    attempt = job.get("run_attempt", 1)
+    return f"{name}-{attempt}" if attempt > 1 else name
 
 
 def validate_artifact(directory, source, label, base=None):
@@ -103,10 +107,10 @@ def validate_artifact(directory, source, label, base=None):
     return record
 
 
-def collect_platform(repository, run, label, source, base, directory, reference="refs/heads/main"):
+def collect_platform(repository, run, label, source, base, directory, job):
     validation = directory / "validation" / label
     github("run", "download", str(run), "--repo", repository,
-           "--name", f"acceptance-{label}", "--dir", str(validation))
+           "--name", artifact_name(f"acceptance-{label}", job), "--dir", str(validation))
     record = validate_artifact(validation, source, label, base)
     return label, record, None
 
@@ -129,7 +133,9 @@ def promote(candidate, base, run_id, repository, output, reference="refs/heads/m
     api = f"repos/{repository}/actions/runs/{run_id}"
     run = json.loads(github("api", api))
     jobs = json.loads(github("api", api + "/jobs?filter=latest&per_page=100"))
-    validate_run(run, jobs, source, repository)
+    labels = ("linux-x86_64",) if reference == "refs/heads/main" else tuple(PLATFORMS)
+    records = validate_run(run, jobs, source, repository,
+                           LINUX_JOBS if reference == "refs/heads/main" else JOBS)
     require_target(reference, base, run["head_branch"], candidate, git_command=git)
     if reference != "refs/heads/main":
         require_remote_target(reference, (base, candidate), git_command=git)
@@ -138,7 +144,7 @@ def promote(candidate, base, run_id, repository, output, reference="refs/heads/m
     validations = {}
     with ThreadPoolExecutor(max_workers=2) as workers:
         futures = [workers.submit(collect_platform, repository, run_id, label, source,
-                                  base, directory, reference) for label in PLATFORMS]
+                                  base, directory, records[f"Candidate ({label})"]) for label in labels]
         for future in futures:
             label, record, _package = future.result()
             validations[label] = record
@@ -162,6 +168,9 @@ def promote(candidate, base, run_id, repository, output, reference="refs/heads/m
     receipt = {
         "schema_version": 1, "source": source, "base": base, "reference": reference,
         "repository": repository, "run": run_id,
+        "jobs": {name: {key: job.get(key) for key in ("id", "run_attempt", "html_url")}
+                 for name, job in records.items() if name in LINUX_JOBS
+                 or name in {f"Candidate ({label})" for label in labels}},
         "validated_platforms": validations,
         "merge_status": "merged", "release_status": "pending",
         "artifacts": str(directory),
@@ -189,14 +198,15 @@ def promote_context(candidate, base, run_id, repository, output):
     run = json.loads(github("api", endpoint))
     jobs = json.loads(github("api", endpoint + "/jobs?filter=latest&per_page=100"))
     required = {"Classify integration", "Validate context records", "Candidate gate"}
-    validate_run(run, jobs, source, repository, required)
+    records = validate_run(run, jobs, source, repository, required)
     if any(job["name"] not in required and job["conclusion"] != "skipped"
            for job in jobs["jobs"]):
         raise ValueError("Record promotion requires the exclusive context validation path")
     output.parent.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="verified-context-", dir=output.parent))
     github("run", "download", str(run_id), "--repo", repository,
-           "--name", "context-validation", "--dir", str(directory))
+           "--name", artifact_name("context-validation", records["Validate context records"]),
+           "--dir", str(directory))
     path = directory / "CONTEXT.json"
     report = json.loads(path.read_text())
     expected = {"scope": "context", "context_only": True, "base": base,
